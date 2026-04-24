@@ -32,6 +32,13 @@ Each task is strictly separated into three logical phases:
 *   **[DATA]**: Exact lookup of target profile information.
 *   **[HISTORY]**: Comprehensive analysis of historical interaction data.
 
+## 📈 EDA Findings Contribution
+The pipeline integrates key findings from the **Exploratory Data Analysis (EDA)** phase to improve prediction accuracy:
+*   **Bimodal Distribution Handling**: Agents are aware of the tendency for reviews to cluster at 1 and 5 stars.
+*   **Sentiment-Star Gap Analysis**: The system cross-references textual sentiment with historical `average_stars` to identify "harsh critics" or "generous guests."
+*   **Review Sparsity Strategy**: The system identifies "power users" with high review counts to establish stronger behavioral baselines.
+*   **Geospatial & Seasonal Context**: EDA patterns regarding location clusters and dining seasons are baked into the agent's knowledge base.
+
 ## 🚀 How to Run
 
 ### Installation

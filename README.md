@@ -85,7 +85,7 @@ Three semantic search tools over ChromaDB vector collections:
 | `search_restaurant_feature_data` | `benchmark_true_fresh_index_Filtered_Item_1` | Category/feature searches |
 | `search_historical_reviews_data` | `benchmark_true_fresh_index_Filtered_Review_1` | Semantic review search |
 
-> ⚠️ **RAG cannot reliably find a specific user or business by ID.** See the [RAG Problem section](#-the-rag-hallucination-problem) below.
+> ⚠️ **RAG cannot reliably find a specific user or business by ID.** See the [RAG Problem section](#-the-rag-hallucination-problem) below and check(#-RAG_IMPLEMENTATION_PROOF) for more details.
 
 ---
 

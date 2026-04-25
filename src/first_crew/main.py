@@ -4,8 +4,9 @@ import warnings
 import json
 import re
 import os
+import time
 from pydantic import BaseModel
-from crewai.flow.flow import Flow, listen, start, and_
+from crewai.flow.flow import Flow, listen, start
 from first_crew.crew import FirstCrew
 
 warnings.filterwarnings("ignore", category=SyntaxWarning, module="pysbd")
@@ -22,6 +23,45 @@ class YelpRecommendationState(BaseModel):
 
 # === Step 2: Define the Parallel Flow ===
 class YelpRecommendationFlow(Flow[YelpRecommendationState]):
+    def _sleep_seconds(self, env_key: str, default_value: int) -> None:
+        try:
+            wait_seconds = int(os.getenv(env_key, str(default_value)))
+        except ValueError:
+            wait_seconds = default_value
+        if wait_seconds > 0:
+            time.sleep(wait_seconds)
+
+    def _build_single_task_crew(self, task_name: str):
+        crew_instance = FirstCrew().crew()
+        selected_task = next(t for t in crew_instance.tasks if t.name == task_name)
+        crew_instance.tasks = [selected_task]
+        return crew_instance
+
+    def _run_with_retries(self, task_name: str, inputs: dict, retries: int = 3):
+        last_error = None
+        for attempt in range(1, retries + 1):
+            try:
+                crew_instance = self._build_single_task_crew(task_name)
+                result = crew_instance.kickoff(inputs=inputs)
+                raw_text = str(result.raw)
+                degraded_markers = (
+                    "Error executing task with agent",
+                    "mentioned not found",
+                    "Too Many Requests",
+                    "Timeout Error",
+                )
+                if any(marker in raw_text for marker in degraded_markers):
+                    raise RuntimeError(f"Degraded output detected for {task_name}: {raw_text[:240]}")
+                return result
+            except Exception as exc:
+                last_error = exc
+                if attempt < retries:
+                    backoff = 30 * attempt  # 30s, 60s — enough for rate limit to reset
+                    print(f"⚠️ [Retry {attempt}/{retries}] {task_name} failed: {exc}. Waiting {backoff}s...")
+                    time.sleep(backoff)
+                else:
+                    print(f"❌ [Retry Exhausted] {task_name} failed after {retries} attempts.")
+        raise RuntimeError(f"Task {task_name} failed after retries: {last_error}")
     
     @start()
     def initialize_request(self):
@@ -30,15 +70,8 @@ class YelpRecommendationFlow(Flow[YelpRecommendationState]):
 
     @listen(initialize_request)
     def fetch_user_profile(self):
-        print(f"👤 [Flow Action]: Analyzing User Profile in parallel...")
-        crew_instance = FirstCrew().crew()
-        
-        # Filter to only the user task
-        user_task = next(t for t in crew_instance.tasks if t.name == "analyze_user_task")
-        crew_instance.tasks = [user_task]
-        
-        # We pass BOTH IDs to satisfy Agent variable interpolation, even if this task only uses one.
-        result = crew_instance.kickoff(inputs={
+        print(f"👤 [Flow Action]: Analyzing User Profile...")
+        result = self._run_with_retries("analyze_user_task", {
             'user_id': self.state.user_id,
             'item_id': self.state.item_id,
             'user_context': '',
@@ -48,19 +81,13 @@ class YelpRecommendationFlow(Flow[YelpRecommendationState]):
         self.state.user_profile = result.raw
         return "user_ready"
 
-    @listen(initialize_request)
+    @listen(fetch_user_profile)
     def fetch_item_profile(self):
-        import time
-        print(f"🏠 [Flow Action]: Waiting 10 seconds to stagger API requests...")
-        time.sleep(10)
-        print(f"🏠 [Flow Action]: Analyzing Item Profile in parallel...")
-        crew_instance = FirstCrew().crew()
-        
-        # Filter to only the item task
-        item_task = next(t for t in crew_instance.tasks if t.name == "analyze_item_task")
-        crew_instance.tasks = [item_task]
-        
-        result = crew_instance.kickoff(inputs={
+        # Sequential after user to avoid simultaneous LLM calls (NVIDIA 429 rate limit)
+        print(f"🏠 [Flow Action]: User profile done. Waiting 45s before Item analysis...")
+        self._sleep_seconds("FLOW_STAGGER_SECONDS", 45)
+        print(f"🏠 [Flow Action]: Analyzing Item Profile...")
+        result = self._run_with_retries("analyze_item_task", {
             'user_id': self.state.user_id,
             'item_id': self.state.item_id,
             'user_context': '',
@@ -72,18 +99,11 @@ class YelpRecommendationFlow(Flow[YelpRecommendationState]):
 
     @listen(fetch_item_profile)
     def fetch_web_research(self):
-        import time
-        print(f"🔍 [Flow Action]: Breathing for 10 seconds before Web Research...")
-        time.sleep(10)
+        print(f"🔍 [Flow Action]: Breathing for 30 seconds before Web Research...")
+        self._sleep_seconds("FLOW_WEB_WAIT_SECONDS", 30)
         print(f"🌐 [Flow Action]: Item profile ready. Now searching the web for real-time trends...")
-        crew_instance = FirstCrew().crew()
-        
-        # Filter to only the web research task
-        web_task = next(t for t in crew_instance.tasks if t.name == "web_research_task")
-        crew_instance.tasks = [web_task]
-        
         # We now have the item_profile, so the agent can see the business name!
-        result = crew_instance.kickoff(inputs={
+        result = self._run_with_retries("web_research_task", {
             'user_id': self.state.user_id,
             'item_id': self.state.item_id,
             'user_context': self.state.user_profile,
@@ -93,28 +113,35 @@ class YelpRecommendationFlow(Flow[YelpRecommendationState]):
         self.state.web_research = result.raw
         return "web_ready"
 
-    @listen(and_(fetch_user_profile, fetch_web_research))
+    @listen(fetch_web_research)
     def run_final_prediction(self):
-        import time
-        print(f"⚖️ [Flow Action]: Data converged. Breathing for 5 seconds before Final Prediction...")
-        time.sleep(5)
+        print(f"⚖️ [Flow Action]: Data converged. Breathing for 60 seconds before Final Prediction...")
+        self._sleep_seconds("FLOW_PREDICTION_WAIT_SECONDS", 60)
         process_type = os.getenv("PROCESS_TYPE", "hierarchical").upper()
         print(f"⚖️ [Flow Action]: Kicking off {process_type} Crew for final prediction...")
-        
-        crew_instance = FirstCrew().crew()
-        # Filter to only the prediction task
-        predict_task = next(t for t in crew_instance.tasks if t.name == "predict_review_task")
-        crew_instance.tasks = [predict_task]
-        
+
+        # Truncate contexts to avoid blowing the TPM budget on the prediction prompt
+        MAX_CTX = int(os.getenv("PREDICTION_MAX_CTX_CHARS", "1200"))
         inputs = {
             'user_id': self.state.user_id,
             'item_id': self.state.item_id,
-            'user_context': self.state.user_profile,
-            'item_context': self.state.item_profile,
-            'web_context': self.state.web_research
+            'user_context': self.state.user_profile[:MAX_CTX],
+            'item_context': self.state.item_profile[:MAX_CTX],
+            'web_context': self.state.web_research[:600]
         }
-        
-        result = crew_instance.kickoff(inputs=inputs)
+
+        try:
+            result = self._run_with_retries("predict_review_task", inputs)
+        except Exception as primary_error:
+            original_mode = os.getenv("PROCESS_TYPE", "hierarchical")
+            if original_mode.lower() == "hierarchical":
+                print(f"⚠️ [Fallback] Hierarchical prediction failed ({primary_error}). Retrying in collaborative mode...")
+                os.environ["PROCESS_TYPE"] = "collaborative"
+                result = self._run_with_retries("predict_review_task", inputs)
+                os.environ["PROCESS_TYPE"] = original_mode
+            else:
+                raise
+
         self.state.raw_result = result.raw
         return "prediction_completed"
 
@@ -130,8 +157,10 @@ class YelpRecommendationFlow(Flow[YelpRecommendationState]):
         with open(filename, 'w', encoding='utf-8') as f:
             json.dump(report, f, indent=2, ensure_ascii=False)
         
-        print(f"✅ [Flow Success]: Stars: {report.get('stars')} | Results saved.")
+        review_snippet = str(report.get('review', report.get('text', '')))[:60]
+        print(f"[Flow Success]: Stars: {report.get('stars')} | Review: {review_snippet}... | Saved to {filename}")
         return report
+
 
     def extract_json_from_output(self, raw_output: str) -> dict:
         """Extract and sanitize JSON from LLM raw output."""
@@ -179,8 +208,10 @@ def run():
     with open(test_json_path, 'r', encoding='utf-8') as f:
         test_data = [json.loads(line) for line in f if line.strip()]
 
-    # Index 11 as requested
-    first_case = test_data[11] if len(test_data) > 11 else test_data[0]
+    # Index 0: first record as required by Lab 9 ("第一筆測試資料")
+    # User: Karen (Elite 2008-2021, avg_stars=3.69) | Item: Pho Street, Philadelphia PA
+    first_case = test_data[0]
+
 
     flow = YelpRecommendationFlow()
     flow.state.user_id = first_case['user_id']

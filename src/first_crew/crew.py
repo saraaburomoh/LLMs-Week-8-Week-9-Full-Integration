@@ -307,13 +307,15 @@ class FirstCrew():
     @task
     def web_research_task(self) -> Task:
         return Task(
-            config=self.tasks_config['web_research_task']
+            config=self.tasks_config['web_research_task'],
+            context=[self.analyze_item_task()]
         )
 
     @task
     def predict_review_task(self) -> Task:
         return Task(
             config=self.tasks_config['predict_review_task'],
+            context=[self.analyze_user_task(), self.analyze_item_task(), self.web_research_task()],
             output_file='report.json'
         )
 
@@ -352,7 +354,7 @@ class FirstCrew():
             manager_agent=exec_manager,
             max_rpm=int(os.getenv("CREW_MAX_RPM", "12")),
             knowledge=Knowledge(
-                collection_name="yelp_knowledge_v3",
+                collection_name="yelp_knowledge_v6",
                 sources=[schema_knowledge, eda_knowledge],
                 embedder={
                     "provider": "sentence-transformer",
